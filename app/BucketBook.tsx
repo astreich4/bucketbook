@@ -1,53 +1,19 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { authClient } from "@/lib/auth-client";
 
 type Purchase = { id: string; name: string; amount: number; date: string };
 type Bucket = { id: string; name: string; amount: number; color: string; purchases: Purchase[] };
-type Periods = Record<string, Bucket[]>;
-
-const colors = ["#FF7455", "#8C6FE8", "#42A989", "#E5A33F", "#5596D8", "#D96793"];
-const starter: Bucket[] = [
-  {
-    id: "groceries", name: "Groceries", amount: 600, color: "#FF7455",
-    purchases: [
-      { id: "g1", name: "Weekly groceries", amount: 142.8, date: "2026-08-01" },
-      { id: "g2", name: "Farmers market", amount: 68.4, date: "2026-08-03" },
-      { id: "g3", name: "Pantry restock", amount: 165.6, date: "2026-08-05" },
-    ],
-  },
-  {
-    id: "dining", name: "Dining out", amount: 300, color: "#8C6FE8",
-    purchases: [
-      { id: "d1", name: "Friday dinner", amount: 86.2, date: "2026-08-02" },
-      { id: "d2", name: "Lunch with Maya", amount: 58.4, date: "2026-08-04" },
-      { id: "d3", name: "Coffee & pastries", amount: 119.8, date: "2026-08-06" },
-    ],
-  },
-  {
-    id: "travel", name: "Travel", amount: 500, color: "#42A989",
-    purchases: [
-      { id: "t1", name: "Train tickets", amount: 218.2, date: "2026-08-01" },
-      { id: "t2", name: "Weekend hotel", amount: 390, date: "2026-08-05" },
-    ],
-  },
-  {
-    id: "personal", name: "Personal", amount: 250, color: "#E5A33F",
-    purchases: [
-      { id: "p1", name: "Haircut", amount: 52, date: "2026-08-03" },
-      { id: "p2", name: "New notebook", amount: 35, date: "2026-08-06" },
-    ],
-  },
-];
-
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 const monthLabel = (period: string) => {
   const [year, month] = period.split("-").map(Number);
   return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1));
 };
 const spent = (bucket: Bucket) => bucket.purchases.reduce((sum, item) => sum + item.amount, 0);
-const uid = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const todayFor = (period: string) => `${period}-01`;
+const currentPeriod = () => new Date().toISOString().slice(0, 7);
 
 function shiftPeriod(period: string, change: number) {
   const [year, month] = period.split("-").map(Number);
@@ -55,14 +21,11 @@ function shiftPeriod(period: string, change: number) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function escapeXml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-
-export function BucketBook() {
-  const [periods, setPeriods] = useState<Periods>({ "2026-08": starter });
-  const [period, setPeriod] = useState("2026-08");
-  const [ready, setReady] = useState(false);
+export function BucketBook({ userEmail }: { userEmail: string }) {
+  const router = useRouter();
+  const [buckets, setBuckets] = useState<Bucket[]>([]);
+  const [period, setPeriod] = useState(currentPeriod);
+  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("all");
   const [addBucketOpen, setAddBucketOpen] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
@@ -70,21 +33,33 @@ export function BucketBook() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [toast, setToast] = useState("");
 
-  useEffect(() => {
+  const loadBuckets = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
     try {
-      const saved = localStorage.getItem("bucketbook-data-v1");
-      if (saved) {
-        const parsed = JSON.parse(saved) as { periods: Periods; period: string };
-        setPeriods(parsed.periods);
-        setPeriod(parsed.period);
+      const response = await fetch(`/api/buckets?period=${encodeURIComponent(period)}`, { signal, cache: "no-store" });
+      if (response.status === 401) {
+        router.push("/sign-in");
+        router.refresh();
+        return;
       }
-    } catch { /* Keep the friendly starter data if saved data is unavailable. */ }
-    setReady(true);
-  }, []);
+      if (!response.ok) throw new Error("Unable to load buckets");
+      const data = await response.json() as { buckets: Bucket[] };
+      setBuckets(data.buckets);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) setToast("Could not load your buckets");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [period, router]);
 
   useEffect(() => {
-    if (ready) localStorage.setItem("bucketbook-data-v1", JSON.stringify({ periods, period }));
-  }, [periods, period, ready]);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => void loadBuckets(controller.signal), 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [loadBuckets]);
 
   useEffect(() => {
     if (!toast) return;
@@ -92,7 +67,6 @@ export function BucketBook() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const buckets = periods[period] ?? [];
   const visible = buckets.filter((bucket) => {
     const ratio = spent(bucket) / bucket.amount;
     if (filter === "on-track") return ratio < 0.75;
@@ -101,70 +75,71 @@ export function BucketBook() {
     return true;
   });
 
-  const updateBuckets = (next: Bucket[]) => setPeriods((current) => ({ ...current, [period]: next }));
-
-  function addBucket(event: FormEvent<HTMLFormElement>) {
+  async function addBucket(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const name = String(data.get("name") ?? "").trim();
-    const amount = Number(data.get("amount"));
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
+    const amount = Number(form.get("amount"));
     if (!name || amount <= 0) return;
-    updateBuckets([...buckets, { id: uid(), name, amount, color: colors[buckets.length % colors.length], purchases: [] }]);
+    const response = await fetch("/api/buckets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, amount, period }),
+    });
+    if (!response.ok) return setToast("Could not add that bucket");
+    const payload = await response.json() as { bucket: Bucket };
+    setBuckets((current) => [...current, payload.bucket]);
     setAddBucketOpen(false);
     setToast(`${name} bucket added`);
   }
 
-  function addPurchase(event: FormEvent<HTMLFormElement>, bucketId: string) {
+  async function addPurchase(event: FormEvent<HTMLFormElement>, bucketId: string) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const name = String(data.get("purchase") ?? "").trim();
-    const amount = Number(data.get("purchaseAmount"));
-    const date = String(data.get("date") ?? todayFor(period));
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("purchase") ?? "").trim();
+    const amount = Number(form.get("purchaseAmount"));
+    const date = String(form.get("date") ?? todayFor(period));
     if (!name || amount <= 0) return;
-    updateBuckets(buckets.map((bucket) => bucket.id === bucketId
-      ? { ...bucket, purchases: [...bucket.purchases, { id: uid(), name, amount, date }] }
-      : bucket));
+    const response = await fetch(`/api/buckets/${encodeURIComponent(bucketId)}/purchases`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, amount, date }),
+    });
+    if (!response.ok) return setToast("Could not add that purchase");
+    const payload = await response.json() as { bucket: Bucket };
+    setBuckets((current) => current.map((bucket) => bucket.id === bucketId ? payload.bucket : bucket));
     event.currentTarget.reset();
     setToast("Purchase added");
   }
 
-  function emptyBuckets() {
-    updateBuckets(buckets.map((bucket) => ({ ...bucket, purchases: [] })));
+  async function emptyBuckets() {
+    const response = await fetch("/api/buckets/empty", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ period }),
+    });
+    if (!response.ok) return setToast("Could not empty the buckets");
+    setBuckets((current) => current.map((bucket) => ({ ...bucket, purchases: [] })));
     setResetOpen(false);
     setToast(`${monthLabel(period)} purchases cleared`);
   }
 
-  function removePurchase(bucketId: string, purchaseId: string) {
-    updateBuckets(buckets.map((bucket) => bucket.id === bucketId
-      ? { ...bucket, purchases: bucket.purchases.filter((item) => item.id !== purchaseId) }
-      : bucket));
+  async function removePurchase(bucketId: string, purchaseId: string) {
+    const response = await fetch(`/api/buckets/${encodeURIComponent(bucketId)}/purchases/${encodeURIComponent(purchaseId)}`, { method: "DELETE" });
+    if (!response.ok) return setToast("Could not remove that purchase");
+    const data = await response.json() as { bucket: Bucket };
+    setBuckets((current) => current.map((bucket) => bucket.id === bucketId ? data.bucket : bucket));
     setToast("Purchase removed");
   }
 
-  function deleteBucket() {
+  async function deleteBucket() {
     if (!bucketToDelete) return;
-    updateBuckets(buckets.filter((bucket) => bucket.id !== bucketToDelete.id));
+    const response = await fetch(`/api/buckets/${encodeURIComponent(bucketToDelete.id)}`, { method: "DELETE" });
+    if (!response.ok) return setToast("Could not delete that bucket");
+    setBuckets((current) => current.filter((bucket) => bucket.id !== bucketToDelete.id));
     if (expanded === bucketToDelete.id) setExpanded(null);
     setToast(`${bucketToDelete.name} bucket deleted`);
     setBucketToDelete(null);
-  }
-
-  function exportExcel() {
-    const rows: string[] = [];
-    Object.entries(periods).sort().forEach(([month, monthBuckets]) => {
-      monthBuckets.forEach((bucket) => {
-        if (!bucket.purchases.length) rows.push(`<Row><Cell><Data ss:Type="String">${escapeXml(monthLabel(month))}</Data></Cell><Cell><Data ss:Type="String">${escapeXml(bucket.name)}</Data></Cell><Cell><Data ss:Type="Number">${bucket.amount}</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="Number">0</Data></Cell><Cell><Data ss:Type="String"></Data></Cell></Row>`);
-        bucket.purchases.forEach((item) => rows.push(`<Row><Cell><Data ss:Type="String">${escapeXml(monthLabel(month))}</Data></Cell><Cell><Data ss:Type="String">${escapeXml(bucket.name)}</Data></Cell><Cell><Data ss:Type="Number">${bucket.amount}</Data></Cell><Cell><Data ss:Type="String">${escapeXml(item.name)}</Data></Cell><Cell><Data ss:Type="Number">${item.amount}</Data></Cell><Cell><Data ss:Type="String">${escapeXml(item.date)}</Data></Cell></Row>`));
-      });
-    });
-    const xml = `<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="BucketBook"><Table><Row><Cell><Data ss:Type="String">Period</Data></Cell><Cell><Data ss:Type="String">Bucket</Data></Cell><Cell><Data ss:Type="String">Budget</Data></Cell><Cell><Data ss:Type="String">Purchase</Data></Cell><Cell><Data ss:Type="String">Amount</Data></Cell><Cell><Data ss:Type="String">Date</Data></Cell></Row>${rows.join("")}</Table></Worksheet></Workbook>`;
-    const url = URL.createObjectURL(new Blob([xml], { type: "application/vnd.ms-excel" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `bucketbook-${period}.xls`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setToast("Excel file downloaded");
   }
 
   function navigate(change: number) {
@@ -172,13 +147,21 @@ export function BucketBook() {
     setPeriod((current) => shiftPeriod(current, change));
   }
 
+  async function signOut() {
+    await authClient.signOut();
+    router.push("/sign-in");
+    router.refresh();
+  }
+
   return (
     <main>
       <header className="topbar">
         <a className="brand" href="#top" aria-label="BucketBook home"><span className="brandMark">B</span><span>Bucket<span>Book</span></span></a>
         <div className="topActions">
+          <span className="signedInAs" title={userEmail}>{userEmail}</span>
           <button className="button ghost" onClick={() => setResetOpen(true)} disabled={!buckets.length}>↻ <span>Empty buckets</span></button>
-          <button className="button dark" onClick={exportExcel}>⇩ <span>Export to Excel</span></button>
+          <a className="button dark" href="/api/export">⇩ <span>Export to Excel</span></a>
+          <button className="signOutButton" onClick={signOut}>Sign out</button>
         </div>
       </header>
 
@@ -209,7 +192,9 @@ export function BucketBook() {
             </div>
           </div>
 
-          {visible.length ? (
+          {loading ? (
+            <div className="emptyState loadingState"><span>…</span><h3>Loading your buckets</h3></div>
+          ) : visible.length ? (
             <div className="bucketGrid">
               {visible.map((bucket) => {
                 const used = spent(bucket);

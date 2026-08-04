@@ -1,12 +1,12 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { BucketBook } from "./BucketBook";
+import { AuthForm } from "../AuthForm";
 import { auth } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-export default async function Home() {
+export default async function SignUpPage() {
   const session = await auth.api.getSession({ headers: await headers() });
-  if (!session) redirect("/sign-in");
-  return <BucketBook userEmail={session.user.email} />;
+  if (session) redirect("/");
+  return <AuthForm mode="sign-up" />;
 }
